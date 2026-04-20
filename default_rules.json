@@ -1,0 +1,246 @@
+[
+  {
+    "id": "ssh_brute_force",
+    "name": "SSH Brute Force",
+    "description": "Detects rapid repeated authentication failures over SSH",
+    "enabled": true,
+    "protocols": ["ssh"],
+    "patterns": [
+      {"field": "event_type", "operator": "eq", "value": "authentication_failed"}
+    ],
+    "aggregation": {
+      "field": "event_type",
+      "value": "authentication_failed",
+      "count_threshold": 5,
+      "window_seconds": 300
+    },
+    "skill_delta": 3,
+    "level_threshold": 0,
+    "action": "escalate_to_level_2"
+  },
+  {
+    "id": "ssh_root_login_attempt",
+    "name": "SSH Root Login Attempt",
+    "description": "Detects authentication attempts using the root username",
+    "enabled": true,
+    "protocols": ["ssh"],
+    "patterns": [
+      {"field": "indicators", "operator": "contains", "value": "user:root"},
+      {"field": "event_type", "operator": "eq", "value": "authentication_failed"}
+    ],
+    "aggregation": null,
+    "skill_delta": 2,
+    "level_threshold": 0,
+    "action": "flag"
+  },
+  {
+    "id": "ssh_credential_stuffing",
+    "name": "SSH Credential Stuffing",
+    "description": "High-volume auth failures indicative of automated credential list attacks",
+    "enabled": true,
+    "protocols": ["ssh"],
+    "patterns": [
+      {"field": "event_type", "operator": "eq", "value": "authentication_failed"}
+    ],
+    "aggregation": {
+      "field": "event_type",
+      "value": "authentication_failed",
+      "count_threshold": 20,
+      "window_seconds": 60
+    },
+    "skill_delta": 5,
+    "level_threshold": 3,
+    "action": "escalate_to_level_3"
+  },
+  {
+    "id": "ssh_successful_auth",
+    "name": "SSH Successful Authentication",
+    "description": "Attacker managed to authenticate — high-value session",
+    "enabled": true,
+    "protocols": ["ssh"],
+    "patterns": [
+      {"field": "event_type", "operator": "eq", "value": "authentication_success"}
+    ],
+    "aggregation": null,
+    "skill_delta": 5,
+    "level_threshold": 0,
+    "action": "escalate_to_level_3"
+  },
+  {
+    "id": "ssh_command_execution",
+    "name": "SSH Command Execution",
+    "description": "Attacker is running shell commands in an active session",
+    "enabled": true,
+    "protocols": ["ssh"],
+    "patterns": [
+      {"field": "event_type", "operator": "eq", "value": "command_executed"}
+    ],
+    "aggregation": null,
+    "skill_delta": 4,
+    "level_threshold": 0,
+    "action": "escalate_to_level_3"
+  },
+  {
+    "id": "http_web_scan",
+    "name": "HTTP Web Scanner",
+    "description": "Automated web scanner probing for vulnerabilities",
+    "enabled": true,
+    "protocols": ["http", "https"],
+    "patterns": [
+      {"field": "event_type", "operator": "eq", "value": "http_scan"}
+    ],
+    "aggregation": {
+      "field": "event_type",
+      "value": "http_scan",
+      "count_threshold": 10,
+      "window_seconds": 120
+    },
+    "skill_delta": 2,
+    "level_threshold": 0,
+    "action": "escalate_to_level_2"
+  },
+  {
+    "id": "http_exploit_attempt",
+    "name": "HTTP Exploit Attempt",
+    "description": "Detects exploit payload delivery (SQLi, XSS, RCE, LFI, RFI)",
+    "enabled": true,
+    "protocols": ["http", "https"],
+    "patterns": [
+      {"field": "event_type", "operator": "eq", "value": "http_exploit_attempt"}
+    ],
+    "aggregation": null,
+    "skill_delta": 4,
+    "level_threshold": 0,
+    "action": "escalate_to_level_2"
+  },
+  {
+    "id": "http_admin_probe",
+    "name": "HTTP Admin Panel Probe",
+    "description": "Requests targeting /admin, /wp-admin, /phpmyadmin etc.",
+    "enabled": true,
+    "protocols": ["http", "https"],
+    "patterns": [
+      {"field": "indicators", "operator": "regex", "value": "url:.*(/admin|/wp-admin|/phpmyadmin|/manager|/.env)"}
+    ],
+    "aggregation": null,
+    "skill_delta": 2,
+    "level_threshold": 0,
+    "action": "flag"
+  },
+  {
+    "id": "http_repeated_exploit",
+    "name": "HTTP Repeated Exploit Attempts",
+    "description": "Persistent exploitation attempts indicate skilled attacker",
+    "enabled": true,
+    "protocols": ["http", "https"],
+    "patterns": [
+      {"field": "event_type", "operator": "eq", "value": "http_exploit_attempt"}
+    ],
+    "aggregation": {
+      "field": "event_type",
+      "value": "http_exploit_attempt",
+      "count_threshold": 5,
+      "window_seconds": 300
+    },
+    "skill_delta": 6,
+    "level_threshold": 4,
+    "action": "escalate_to_level_3"
+  },
+  {
+    "id": "port_scan_detection",
+    "name": "Port Scan Detection",
+    "description": "IP is scanning multiple ports in a short window",
+    "enabled": true,
+    "protocols": [],
+    "patterns": [
+      {"field": "event_type", "operator": "eq", "value": "port_scan"}
+    ],
+    "aggregation": {
+      "field": "event_type",
+      "value": "port_scan",
+      "count_threshold": 3,
+      "window_seconds": 60
+    },
+    "skill_delta": 1,
+    "level_threshold": 0,
+    "action": "flag"
+  },
+  {
+    "id": "telnet_access",
+    "name": "Telnet Connection Attempt",
+    "description": "Telnet is insecure; any connection attempt is suspicious",
+    "enabled": true,
+    "protocols": ["telnet"],
+    "patterns": [
+      {"field": "event_type", "operator": "in", "value": ["connection_attempt", "session_opened", "authentication_failed"]}
+    ],
+    "aggregation": null,
+    "skill_delta": 2,
+    "level_threshold": 0,
+    "action": "escalate_to_level_2"
+  },
+  {
+    "id": "data_exfiltration",
+    "name": "Data Exfiltration Attempt",
+    "description": "Session is attempting to exfiltrate data",
+    "enabled": true,
+    "protocols": [],
+    "patterns": [
+      {"field": "event_type", "operator": "eq", "value": "data_exfiltration"}
+    ],
+    "aggregation": null,
+    "skill_delta": 8,
+    "level_threshold": 0,
+    "action": "escalate_to_level_3"
+  },
+  {
+    "id": "mysql_brute_force",
+    "name": "MySQL Brute Force",
+    "description": "Repeated failed MySQL authentication attempts",
+    "enabled": true,
+    "protocols": ["mysql"],
+    "patterns": [
+      {"field": "event_type", "operator": "eq", "value": "authentication_failed"}
+    ],
+    "aggregation": {
+      "field": "event_type",
+      "value": "authentication_failed",
+      "count_threshold": 4,
+      "window_seconds": 120
+    },
+    "skill_delta": 3,
+    "level_threshold": 0,
+    "action": "escalate_to_level_2"
+  },
+  {
+    "id": "multi_protocol_attacker",
+    "name": "Multi-Protocol Attacker",
+    "description": "Session has events across SSH and HTTP — likely tooled attacker",
+    "enabled": true,
+    "protocols": [],
+    "patterns": [
+      {"field": "protocol", "operator": "in", "value": ["ssh", "http", "https", "ftp", "telnet"]}
+    ],
+    "aggregation": {
+      "field": "event_type",
+      "value": "connection_attempt",
+      "count_threshold": 3,
+      "window_seconds": 600
+    },
+    "skill_delta": 3,
+    "level_threshold": 2,
+    "action": "escalate_to_level_2"
+  },
+  {
+    "id": "high_skill_persistent",
+    "name": "High-Skill Persistent Threat",
+    "description": "Session skill score exceeds 10 — escalate to deepest honeypot tier",
+    "enabled": true,
+    "protocols": [],
+    "patterns": [],
+    "aggregation": null,
+    "skill_delta": 0,
+    "level_threshold": 10,
+    "action": "escalate_to_level_3"
+  }
+]
