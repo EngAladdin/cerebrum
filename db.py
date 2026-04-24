@@ -1,110 +1,159 @@
 """
-cerebrum/db.py — SQLite persistence layer.
+cerebrum/db.py — MySQL persistence layer.
 Tables: events, sessions, decisions, kg_nodes, kg_edges
 """
 
 import json
-import sqlite3
 import logging
 import os
 from datetime import datetime, timezone, timedelta
 
+import pymysql
+import pymysql.cursors
+
 log = logging.getLogger("cerebrum.db")
 
-SCHEMA = """
-PRAGMA journal_mode=WAL;
-PRAGMA foreign_keys=ON;
+# ---------------------------------------------------------------------------
+# Configuration — from environment variables (Railway MySQL)
+# ---------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS sessions (
-    session_id    TEXT PRIMARY KEY,
-    source_ip     TEXT NOT NULL,
-    skill_score   INTEGER DEFAULT 0,
-    current_level INTEGER DEFAULT 1,
-    first_seen    TEXT NOT NULL,
-    last_seen     TEXT NOT NULL
-);
+MYSQL_HOST     = os.environ.get("MYSQLHOST",     os.environ.get("DB_HOST", "localhost"))
+MYSQL_PORT     = int(os.environ.get("MYSQLPORT", os.environ.get("DB_PORT", "3306")))
+MYSQL_USER     = os.environ.get("MYSQLUSER",     os.environ.get("DB_USER", "root"))
+MYSQL_PASSWORD = os.environ.get("MYSQLPASSWORD", os.environ.get("DB_PASSWORD", ""))
+MYSQL_DATABASE = os.environ.get("MYSQLDATABASE", os.environ.get("DB_NAME", "cerebrum"))
 
-CREATE TABLE IF NOT EXISTS events (
-    id           TEXT PRIMARY KEY,
-    session_id   TEXT NOT NULL,
-    timestamp    TEXT NOT NULL,
-    protocol     TEXT,
-    type         TEXT NOT NULL,
-    indicators   TEXT,      -- JSON array
-    source_ip    TEXT,
-    dest_ip      TEXT,
-    dest_port    INTEGER,
-    username     TEXT,
-    sensor       TEXT,
-    extra        TEXT,      -- JSON object
-    received_at  TEXT NOT NULL,
-    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
-);
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
 
-CREATE TABLE IF NOT EXISTS decisions (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id       TEXT NOT NULL,
-    rule_id          TEXT NOT NULL,
-    skill_score_after INTEGER,
-    action           TEXT NOT NULL,
-    explanation      TEXT,
-    timestamp        TEXT NOT NULL,
-    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
-);
-
-CREATE TABLE IF NOT EXISTS kg_nodes (
-    id         TEXT PRIMARY KEY,
-    type       TEXT NOT NULL,   -- 'session' | 'event' | 'rule'
-    data       TEXT,            -- JSON blob
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS kg_edges (
-    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    src              TEXT NOT NULL,
-    rel              TEXT NOT NULL,
-    dst              TEXT NOT NULL,
-    evidence_event_id TEXT,
-    created_at       TEXT NOT NULL,
-    UNIQUE(src, rel, dst)
-);
-
-CREATE INDEX IF NOT EXISTS idx_events_session   ON events(session_id);
-CREATE INDEX IF NOT EXISTS idx_events_type      ON events(type);
-CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
-CREATE INDEX IF NOT EXISTS idx_decisions_session ON decisions(session_id);
-"""
+SCHEMA = [
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        session_id    VARCHAR(256) PRIMARY KEY,
+        source_ip     VARCHAR(64)  NOT NULL,
+        skill_score   INT          NOT NULL DEFAULT 0,
+        current_level INT          NOT NULL DEFAULT 1,
+        first_seen    VARCHAR(64)  NOT NULL,
+        last_seen     VARCHAR(64)  NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS events (
+        id           VARCHAR(256) PRIMARY KEY,
+        session_id   VARCHAR(256) NOT NULL,
+        timestamp    VARCHAR(64)  NOT NULL,
+        protocol     VARCHAR(32),
+        type         VARCHAR(128) NOT NULL,
+        indicators   TEXT,
+        source_ip    VARCHAR(64),
+        dest_ip      VARCHAR(64),
+        dest_port    INT,
+        username     VARCHAR(128),
+        sensor       VARCHAR(128),
+        extra        TEXT,
+        received_at  VARCHAR(64)  NOT NULL,
+        INDEX idx_events_session   (session_id),
+        INDEX idx_events_type      (type),
+        INDEX idx_events_timestamp (timestamp)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS decisions (
+        id                INT AUTO_INCREMENT PRIMARY KEY,
+        session_id        VARCHAR(256) NOT NULL,
+        rule_id           VARCHAR(128) NOT NULL,
+        skill_score_after INT,
+        action            VARCHAR(64)  NOT NULL,
+        explanation       TEXT,
+        timestamp         VARCHAR(64)  NOT NULL,
+        INDEX idx_decisions_session (session_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS kg_nodes (
+        id         VARCHAR(256) PRIMARY KEY,
+        type       VARCHAR(32)  NOT NULL,
+        data       TEXT,
+        created_at VARCHAR(64)  NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS kg_edges (
+        id                INT AUTO_INCREMENT PRIMARY KEY,
+        src               VARCHAR(256) NOT NULL,
+        rel               VARCHAR(64)  NOT NULL,
+        dst               VARCHAR(256) NOT NULL,
+        evidence_event_id VARCHAR(256),
+        created_at        VARCHAR(64)  NOT NULL,
+        UNIQUE KEY uniq_edge (src, rel, dst)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    """,
+]
 
 
 class Database:
-    def __init__(self, path: str):
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        self._path = path
-        self._con  = sqlite3.connect(path, check_same_thread=False)
-        self._con.row_factory = sqlite3.Row
-        self._con.executescript(SCHEMA)
-        self._con.commit()
-        log.info(f"Database ready at {path}")
+    def __init__(self):
+        self._connect()
+        self._init_schema()
+        log.info("MySQL database ready at %s:%s/%s", MYSQL_HOST, MYSQL_PORT, MYSQL_DATABASE)
+
+    def _connect(self):
+        self._con = pymysql.connect(
+            host=MYSQL_HOST,
+            port=MYSQL_PORT,
+            user=MYSQL_USER,
+            password=MYSQL_PASSWORD,
+            database=MYSQL_DATABASE,
+            charset="utf8mb4",
+            cursorclass=pymysql.cursors.DictCursor,
+            autocommit=True,
+            connect_timeout=10,
+        )
+
+    def _ensure_connected(self):
+        try:
+            self._con.ping(reconnect=True)
+        except Exception:
+            self._connect()
+
+    def _init_schema(self):
+        self._ensure_connected()
+        with self._con.cursor() as cur:
+            for stmt in SCHEMA:
+                cur.execute(stmt)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def execute(self, sql: str, params=()) -> sqlite3.Cursor:
-        cur = self._con.execute(sql, params)
-        self._con.commit()
+    def execute(self, sql: str, params=()):
+        # MySQL uses %s instead of ?
+        sql = sql.replace("?", "%s")
+        self._ensure_connected()
+        with self._con.cursor() as cur:
+            cur.execute(sql, params)
         return cur
 
-    def fetchone(self, sql: str, params=()) -> sqlite3.Row | None:
-        return self._con.execute(sql, params).fetchone()
+    def fetchone(self, sql: str, params=()) -> dict | None:
+        sql = sql.replace("?", "%s")
+        self._ensure_connected()
+        with self._con.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchone()
 
-    def fetchall(self, sql: str, params=()) -> list[sqlite3.Row]:
-        return self._con.execute(sql, params).fetchall()
+    def fetchall(self, sql: str, params=()) -> list[dict]:
+        sql = sql.replace("?", "%s")
+        self._ensure_connected()
+        with self._con.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
 
     # ── Sessions ──────────────────────────────────────────────────────────────
 
     def get_or_create_session(self, session_id: str, source_ip: str) -> dict:
         now = _now()
+        # MySQL INSERT IGNORE instead of INSERT OR IGNORE
         self.execute(
-            """INSERT OR IGNORE INTO sessions
+            """INSERT IGNORE INTO sessions
                (session_id, source_ip, skill_score, current_level, first_seen, last_seen)
                VALUES (?, ?, 0, 1, ?, ?)""",
             (session_id, source_ip, now, now),
@@ -113,23 +162,20 @@ class Database:
             "UPDATE sessions SET last_seen = ? WHERE session_id = ?",
             (now, session_id),
         )
-        return dict(self.fetchone("SELECT * FROM sessions WHERE session_id = ?", (session_id,)))
+        return self.fetchone("SELECT * FROM sessions WHERE session_id = ?", (session_id,))
 
     def get_session(self, session_id: str) -> dict | None:
-        row = self.fetchone("SELECT * FROM sessions WHERE session_id = ?", (session_id,))
-        return dict(row) if row else None
+        return self.fetchone("SELECT * FROM sessions WHERE session_id = ?", (session_id,))
 
     def list_sessions(self, limit: int = 50, level: int | None = None) -> list[dict]:
         if level is not None:
-            rows = self.fetchall(
+            return self.fetchall(
                 "SELECT * FROM sessions WHERE current_level = ? ORDER BY last_seen DESC LIMIT ?",
                 (level, limit),
             )
-        else:
-            rows = self.fetchall(
-                "SELECT * FROM sessions ORDER BY last_seen DESC LIMIT ?", (limit,)
-            )
-        return [dict(r) for r in rows]
+        return self.fetchall(
+            "SELECT * FROM sessions ORDER BY last_seen DESC LIMIT ?", (limit,)
+        )
 
     def update_skill_score(self, session_id: str, delta: int) -> int:
         self.execute(
@@ -149,8 +195,9 @@ class Database:
     # ── Events ────────────────────────────────────────────────────────────────
 
     def save_event(self, event: dict) -> None:
+        # MySQL REPLACE INTO instead of INSERT OR REPLACE
         self.execute(
-            """INSERT OR REPLACE INTO events
+            """REPLACE INTO events
                (id, session_id, timestamp, protocol, type, indicators,
                 source_ip, dest_ip, dest_port, username, sensor, extra, received_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -176,25 +223,27 @@ class Database:
             "SELECT * FROM events WHERE session_id = ? ORDER BY timestamp ASC",
             (session_id,),
         )
-        return [_row_to_dict(r) for r in rows]
+        return [_parse_json_fields(r) for r in rows]
 
     def count_events_in_window(
         self, session_id: str, event_types: list[str], window_seconds: int
     ) -> int:
         if not event_types:
-            # Score-based rule — always passes
             return 1
         cutoff = (
             datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
         ).isoformat()
-        placeholders = ",".join("?" * len(event_types))
-        row = self.fetchone(
-            f"""SELECT COUNT(*) as cnt FROM events
-                WHERE session_id = ?
-                  AND type IN ({placeholders})
-                  AND timestamp >= ?""",
-            (session_id, *event_types, cutoff),
-        )
+        placeholders = ",".join(["%s"] * len(event_types))
+        self._ensure_connected()
+        with self._con.cursor() as cur:
+            cur.execute(
+                f"""SELECT COUNT(*) as cnt FROM events
+                    WHERE session_id = %s
+                      AND type IN ({placeholders})
+                      AND timestamp >= %s""",
+                (session_id, *event_types, cutoff),
+            )
+            row = cur.fetchone()
         return row["cnt"] if row else 0
 
     # ── Decisions ─────────────────────────────────────────────────────────────
@@ -215,17 +264,15 @@ class Database:
         )
 
     def get_decisions_for_session(self, session_id: str) -> list[dict]:
-        rows = self.fetchall(
+        return self.fetchall(
             "SELECT * FROM decisions WHERE session_id = ? ORDER BY timestamp ASC",
             (session_id,),
         )
-        return [dict(r) for r in rows]
 
     def list_decisions(self, limit: int = 100) -> list[dict]:
-        rows = self.fetchall(
+        return self.fetchall(
             "SELECT * FROM decisions ORDER BY timestamp DESC LIMIT ?", (limit,)
         )
-        return [dict(r) for r in rows]
 
     # ── Metrics ───────────────────────────────────────────────────────────────
 
@@ -234,36 +281,35 @@ class Database:
         total_events    = self.fetchone("SELECT COUNT(*) as c FROM events")["c"]
         total_decisions = self.fetchone("SELECT COUNT(*) as c FROM decisions")["c"]
         avg_score       = self.fetchone("SELECT AVG(skill_score) as a FROM sessions")["a"] or 0
-        by_level = self.fetchall(
-            "SELECT current_level, COUNT(*) as c FROM sessions GROUP BY current_level"
-        )
-        escalations = self.fetchall(
-            "SELECT action, COUNT(*) as c FROM decisions GROUP BY action"
-        )
-        top_rules = self.fetchall(
-            """SELECT rule_id, COUNT(*) as c FROM decisions
-               GROUP BY rule_id ORDER BY c DESC LIMIT 10"""
+        by_level        = self.fetchall("SELECT current_level, COUNT(*) as c FROM sessions GROUP BY current_level")
+        escalations     = self.fetchall("SELECT action, COUNT(*) as c FROM decisions GROUP BY action")
+        top_rules       = self.fetchall(
+            "SELECT rule_id, COUNT(*) as c FROM decisions GROUP BY rule_id ORDER BY c DESC LIMIT 10"
         )
         return {
-            "total_sessions":  total_sessions,
-            "total_events":    total_events,
-            "total_decisions": total_decisions,
-            "avg_skill_score": round(avg_score, 2),
-            "sessions_by_level": {str(r["current_level"]): r["c"] for r in by_level},
-            "decisions_by_action": {r["action"]: r["c"] for r in escalations},
-            "top_rules": [{"rule_id": r["rule_id"], "count": r["c"]} for r in top_rules],
+            "total_sessions":     total_sessions,
+            "total_events":       total_events,
+            "total_decisions":    total_decisions,
+            "avg_skill_score":    round(float(avg_score), 2),
+            "sessions_by_level":  {str(r["current_level"]): r["c"] for r in by_level},
+            "decisions_by_action":{r["action"]: r["c"] for r in escalations},
+            "top_rules":          [{"rule_id": r["rule_id"], "count": r["c"]} for r in top_rules],
         }
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-def _row_to_dict(row: sqlite3.Row) -> dict:
-    d = dict(row)
+
+def _parse_json_fields(row: dict) -> dict:
     for field in ("indicators", "extra"):
-        if field in d and isinstance(d[field], str):
+        if field in row and isinstance(row[field], str):
             try:
-                d[field] = json.loads(d[field])
+                row[field] = json.loads(row[field])
             except Exception:
                 pass
-    return d
+    return row
