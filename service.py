@@ -41,7 +41,7 @@ PORT            = int(os.getenv("PORT", 8002))
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.db   = Database(DB_PATH)
+    app.state.db = Database()
     app.state.kg   = KnowledgeGraph(app.state.db)
     app.state.rules= load_rules(SAMPLE_RULES)
     app.state.engine = RulesEngine(app.state.rules, app.state.db)
