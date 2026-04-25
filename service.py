@@ -207,7 +207,7 @@ class NormalizedEvent(BaseModel):
     id:         str
     session_id: str
     timestamp:  str
-    protocol:   str
+    protocol:   Optional[str] = None
     type:       str
     indicators: list[str]     = Field(default_factory=list)
     source_ip:  str
