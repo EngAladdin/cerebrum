@@ -17,10 +17,9 @@ USER cerebrum
 
 EXPOSE ${PORT:-8002}
 
-# تأكد من وجود /healthz في service.py
-# أو غيّر المسار إلى /health أو / حسب المتاح عندك
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8002}/health || exit 1
+# صحّح الـ HealthCheck - يفحص فقط لو التطبيق شغال (يعطي HTTP 200)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8002}/ || exit 1
 
-# شغل الـ service مع إعادة تشغيل تلقائي لو فشل
+# شغل التطبيق
 CMD ["sh", "-c", "exec uvicorn service:app --host 0.0.0.0 --port ${PORT:-8002} --log-level info"]
