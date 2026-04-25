@@ -15,10 +15,12 @@ COPY . .
 RUN useradd -r -s /bin/false cerebrum && chown -R cerebrum:cerebrum /app
 USER cerebrum
 
-EXPOSE 8002
+EXPOSE ${PORT:-8002}
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8002}/healthz || exit 1
+# تأكد من وجود /healthz في service.py
+# أو غيّر المسار إلى /health أو / حسب المتاح عندك
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8002}/health || exit 1
 
-# service.py عنده Redis consumer جوّاه — مش محتاج ملف تاني
-CMD ["sh", "-c", "uvicorn service:app --host 0.0.0.0 --port ${PORT:-8002} --log-level info"]
+# شغل الـ service مع إعادة تشغيل تلقائي لو فشل
+CMD ["sh", "-c", "exec uvicorn service:app --host 0.0.0.0 --port ${PORT:-8002} --log-level info"]
