@@ -33,10 +33,10 @@ logging.basicConfig(
 log = logging.getLogger("cerebrum")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-REDIS_URL        = os.getenv("REDIS_URL", "redis://localhost:6379")
-REDIS_QUEUE_KEY  = os.getenv("REDIS_QUEUE_KEY", "cerebrum:events")
+REDIS_URL        = os.getenv("REDIS_URL",        "redis://localhost:6379")
+REDIS_QUEUE_KEY  = os.getenv("REDIS_QUEUE_KEY",  "cerebrum:events")
 ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://orchestrator:8001")
-HMAC_SECRET      = os.getenv("HMAC_SECRET", "super-secret-key").encode()
+HMAC_SECRET      = os.getenv("HMAC_SECRET",      "super-secret-key").encode()
 PORT             = int(os.getenv("PORT", 8002))
 
 
@@ -53,8 +53,10 @@ _EVENT_TYPE_MAP = {
     "connection":                  "connection_new",
 }
 
+
 def _map_event_type(et: str) -> str:
     return _EVENT_TYPE_MAP.get(et, et)
+
 
 def _build_indicators(raw: dict) -> list:
     indicators = list(raw.get("indicators", []))
@@ -67,6 +69,7 @@ def _build_indicators(raw: dict) -> list:
     if raw.get("payload"):
         indicators.append(f"payload:{str(raw['payload'])[:100]}")
     return indicators
+
 
 def _map_raw_to_event(raw: dict) -> dict:
     """Map CerebrumEvent (from ingestion) → NormalizedEvent (for cerebrum)."""
@@ -96,7 +99,7 @@ async def redis_consumer(state):
     """
     log.info("Redis consumer started → queue: %s", REDIS_QUEUE_KEY)
     processed = 0
-    failed = 0
+    failed    = 0
 
     while True:
         try:
@@ -120,6 +123,12 @@ async def redis_consumer(state):
 
             # Map to NormalizedEvent dict
             event_dict = _map_raw_to_event(raw)
+
+            # Validate required fields before processing
+            if not event_dict.get("id"):
+                log.warning("Event missing ID, skipping: %s", str(raw)[:200])
+                continue
+
             event = NormalizedEvent(**event_dict)
 
             # Process
@@ -128,13 +137,15 @@ async def redis_consumer(state):
 
             if processed % 50 == 0:
                 log.info("Consumer: processed=%d failed=%d", processed, failed)
+            else:
+                log.debug("Consumer: event %s processed", event.id)
 
         except asyncio.CancelledError:
-            log.info("Redis consumer stopped")
+            log.info("Redis consumer stopped — processed=%d failed=%d", processed, failed)
             break
         except Exception as e:
             failed += 1
-            log.exception("Consumer error: %s", e)
+            log.exception("Consumer error (failed=%d): %s", failed, e)
             await asyncio.sleep(2)
 
 
@@ -142,7 +153,9 @@ async def redis_consumer(state):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Init DB + KG + Rules
+    log.info("Cerebrum starting up")
+
+    # Init DB (MySQL) + KG + Rules
     app.state.db     = Database()
     app.state.kg     = KnowledgeGraph(app.state.db)
     app.state.rules  = load_rules(SAMPLE_RULES)
@@ -158,16 +171,21 @@ async def lifespan(app: FastAPI):
         await app.state.redis.ping()
         log.info("Redis connected: %s", REDIS_URL)
     except Exception as e:
-        log.warning("Redis unavailable (%s) — consumer disabled", e)
+        log.warning("Redis unavailable (%s) — consumer will retry", e)
         app.state.redis = None
 
     # Start Redis consumer as background task
     consumer_task = asyncio.create_task(redis_consumer(app.state))
 
-    log.info("Cerebrum ready — %d rules loaded", len(app.state.rules))
+    log.info(
+        "Cerebrum ready — %d rules loaded, queue=%s",
+        len(app.state.rules),
+        REDIS_QUEUE_KEY,
+    )
     yield
 
     # Shutdown
+    log.info("Cerebrum shutting down")
     consumer_task.cancel()
     try:
         await consumer_task
@@ -191,13 +209,13 @@ class NormalizedEvent(BaseModel):
     timestamp:  str
     protocol:   str
     type:       str
-    indicators: list[str]       = Field(default_factory=list)
+    indicators: list[str]     = Field(default_factory=list)
     source_ip:  str
-    dest_ip:    Optional[str]   = None
-    dest_port:  Optional[int]   = None
-    username:   Optional[str]   = None
-    sensor:     Optional[str]   = None
-    extra:      dict             = Field(default_factory=dict)
+    dest_ip:    Optional[str] = None
+    dest_port:  Optional[int] = None
+    username:   Optional[str] = None
+    sensor:     Optional[str] = None
+    extra:      dict          = Field(default_factory=dict)
 
 
 class RuleCreate(BaseModel):
@@ -205,12 +223,12 @@ class RuleCreate(BaseModel):
     description:     str
     protocol:        Optional[str] = None
     event_types:     list[str]
-    indicators:      list[str]  = []
-    window_seconds:  int        = 300
-    count_threshold: int        = 1
-    skill_delta:     int        = 1
-    level_threshold: int        = 3
-    action:          str        = "escalate_to_level_2"
+    indicators:      list[str] = []
+    window_seconds:  int       = 300
+    count_threshold: int       = 1
+    skill_delta:     int       = 1
+    level_threshold: int       = 3
+    action:          str       = "escalate_to_level_2"
 
 
 # ── HMAC helpers ──────────────────────────────────────────────────────────────
@@ -218,8 +236,10 @@ class RuleCreate(BaseModel):
 def make_hmac(payload: str) -> str:
     return hmac.new(HMAC_SECRET, payload.encode(), hashlib.sha256).hexdigest()
 
+
 def verify_hmac(request_hmac: str, payload: str) -> bool:
     return hmac.compare_digest(make_hmac(payload), request_hmac)
+
 
 async def require_hmac(request: Request):
     sig  = request.headers.get("X-HMAC-Signature", "")
@@ -277,7 +297,10 @@ async def _post_to_orchestrator(decision: dict):
             r = await client.post(
                 f"{ORCHESTRATOR_URL}/escalate",
                 content=payload,
-                headers={"Content-Type": "application/json", "X-HMAC-Signature": sig},
+                headers={
+                    "Content-Type":    "application/json",
+                    "X-HMAC-Signature": sig,
+                },
             )
             if r.status_code != 200:
                 log.warning("Orchestrator returned %d", r.status_code)
@@ -298,6 +321,7 @@ async def ingest_event(event: NormalizedEvent, background_tasks: BackgroundTasks
 def list_rules():
     return {"rules": app.state.rules}
 
+
 @app.post("/rules", status_code=201)
 def create_rule(rule: RuleCreate):
     new = rule.model_dump()
@@ -307,6 +331,7 @@ def create_rule(rule: RuleCreate):
     app.state.engine.rules = app.state.rules
     return {"created": True, "rule": new}
 
+
 @app.put("/rules/{rule_id}")
 def update_rule(rule_id: str, rule: RuleCreate):
     for i, r in enumerate(app.state.rules):
@@ -315,6 +340,7 @@ def update_rule(rule_id: str, rule: RuleCreate):
             app.state.engine.rules = app.state.rules
             return {"updated": True, "rule": app.state.rules[i]}
     raise HTTPException(404, f"Rule '{rule_id}' not found")
+
 
 @app.delete("/rules/{rule_id}")
 def delete_rule(rule_id: str):
@@ -330,12 +356,14 @@ def delete_rule(rule_id: str):
 def list_sessions(limit: int = 50, level: Optional[int] = None):
     return {"sessions": app.state.db.list_sessions(limit=limit, level=level)}
 
+
 @app.get("/sessions/{session_id}")
 def get_session(session_id: str):
     s = app.state.db.get_session(session_id)
     if not s:
         raise HTTPException(404, "Session not found")
     return s
+
 
 @app.get("/sessions/{session_id}/events")
 def get_session_events(session_id: str):
@@ -357,14 +385,16 @@ def explain_session(session_id: str):
         f"decisions={len(decisions)}."
     ]
     for d in decisions:
-        lines.append(f"  → {d['rule_id']} (score→{d['skill_score_after']}): {d['explanation']}")
+        lines.append(
+            f"  → {d['rule_id']} (score→{d['skill_score_after']}): {d['explanation']}"
+        )
 
     return {
-        "session_id":    session_id,
-        "skill_score":   session["skill_score"],
-        "current_level": session["current_level"],
-        "decisions":     decisions,
-        "kg":            kg_data,
+        "session_id":     session_id,
+        "skill_score":    session["skill_score"],
+        "current_level":  session["current_level"],
+        "decisions":      decisions,
+        "kg":             kg_data,
         "human_readable": lines,
     }
 
@@ -373,12 +403,15 @@ def explain_session(session_id: str):
 def list_decisions(limit: int = 100):
     return {"decisions": app.state.db.list_decisions(limit=limit)}
 
+
 @app.get("/metrics")
 def get_metrics():
     return app.state.db.get_metrics()
 
-@app.get("/healthz")
-async def health():
+
+# ── Health (Railway بيستخدم /health و /healthz) ──────────────────────────────
+
+async def _health_response():
     redis_ok = False
     if app.state.redis:
         try:
@@ -386,9 +419,40 @@ async def health():
             redis_ok = True
         except Exception:
             pass
+
+    db_ok = False
+    try:
+        app.state.db.fetchone("SELECT 1")
+        db_ok = True
+    except Exception:
+        pass
+
     return {
-        "status":  "ok",
-        "redis":   redis_ok,
-        "rules":   len(app.state.rules),
+        "status":   "ok" if (redis_ok and db_ok) else "degraded",
+        "redis":    redis_ok,
+        "db":       db_ok,
+        "rules":    len(app.state.rules),
         "consumer": "running" if redis_ok else "disabled",
+        "queue":    REDIS_QUEUE_KEY,
+    }
+
+
+@app.get("/healthz")
+async def healthz():
+    return await _health_response()
+
+
+@app.get("/health")
+async def health():
+    return await _health_response()
+
+
+@app.get("/")
+async def root():
+    return {
+        "service": "cerebrum",
+        "status":  "running",
+        "rules":   len(app.state.rules),
+        "queue":   REDIS_QUEUE_KEY,
+        "docs":    "/docs",
     }
