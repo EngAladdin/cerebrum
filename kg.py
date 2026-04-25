@@ -1,8 +1,9 @@
 """
-cerebrum/kg.py — Knowledge Graph (SQLite-backed nodes + edges).
+cerebrum/kg.py — Knowledge Graph (MySQL-backed nodes + edges).
 Tables: kg_nodes, kg_edges, session_nodes
 """
 
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -15,27 +16,30 @@ class KnowledgeGraph:
 
     def add_event_node(self, event) -> None:
         """Create a KG node for the event and link it to its session."""
-        # Session node (upsert)
+        # Session node (insert if not exists)
         self.db.execute(
-            """INSERT OR IGNORE INTO kg_nodes (id, type, data, created_at)
-               VALUES (?, 'session', ?, ?)""",
+            """INSERT IGNORE INTO kg_nodes (id, type, data, created_at)
+               VALUES (%s, 'session', %s, %s)""",
             (event.session_id,
-             f'{{"source_ip":"{event.source_ip}"}}',
+             json.dumps({"source_ip": event.source_ip}),
              _now()),
         )
-        # Event node
+        # Event node (replace if exists)
         self.db.execute(
-            """INSERT OR REPLACE INTO kg_nodes (id, type, data, created_at)
-               VALUES (?, 'event', ?, ?)""",
+            """REPLACE INTO kg_nodes (id, type, data, created_at)
+               VALUES (%s, 'event', %s, %s)""",
             (event.id,
-             f'{{"type":"{event.type}","protocol":"{event.protocol}",'
-             f'"timestamp":"{event.timestamp}"}}',
+             json.dumps({
+                 "type": event.type,
+                 "protocol": event.protocol,
+                 "timestamp": event.timestamp
+             }),
              _now()),
         )
         # Edge: session -[has_event]-> event
         self.db.execute(
-            """INSERT OR IGNORE INTO kg_edges (src, rel, dst, evidence_event_id, created_at)
-               VALUES (?, 'has_event', ?, ?, ?)""",
+            """INSERT IGNORE INTO kg_edges (src, rel, dst, evidence_event_id, created_at)
+               VALUES (%s, 'has_event', %s, %s, %s)""",
             (event.session_id, event.id, event.id, _now()),
         )
 
@@ -43,20 +47,20 @@ class KnowledgeGraph:
         """Add rule node and edges: event -[matches_rule]-> rule."""
         # Rule node
         self.db.execute(
-            """INSERT OR IGNORE INTO kg_nodes (id, type, data, created_at)
-               VALUES (?, 'rule', ?, ?)""",
-            (rule_id, f'{{"rule_id":"{rule_id}"}}', _now()),
+            """INSERT IGNORE INTO kg_nodes (id, type, data, created_at)
+               VALUES (%s, 'rule', %s, %s)""",
+            (rule_id, json.dumps({"rule_id": rule_id}), _now()),
         )
         # Edge: event -[matches_rule]-> rule
         self.db.execute(
-            """INSERT OR IGNORE INTO kg_edges (src, rel, dst, evidence_event_id, created_at)
-               VALUES (?, 'matches_rule', ?, ?, ?)""",
+            """INSERT IGNORE INTO kg_edges (src, rel, dst, evidence_event_id, created_at)
+               VALUES (%s, 'matches_rule', %s, %s, %s)""",
             (event_id, rule_id, event_id, _now()),
         )
         # Edge: session -[triggered_rule]-> rule
         self.db.execute(
-            """INSERT OR IGNORE INTO kg_edges (src, rel, dst, evidence_event_id, created_at)
-               VALUES (?, 'triggered_rule', ?, ?, ?)""",
+            """INSERT IGNORE INTO kg_edges (src, rel, dst, evidence_event_id, created_at)
+               VALUES (%s, 'triggered_rule', %s, %s, %s)""",
             (session_id, rule_id, event_id, _now()),
         )
 
@@ -66,7 +70,7 @@ class KnowledgeGraph:
         edges = self.db.fetchall(
             """SELECT src, rel, dst, evidence_event_id
                FROM kg_edges
-               WHERE src = ? OR dst = ?""",
+               WHERE src = %s OR dst = %s""",
             (session_id, session_id),
         )
         # Collect all node IDs
@@ -77,7 +81,7 @@ class KnowledgeGraph:
 
         nodes = []
         for nid in node_ids:
-            row = self.db.fetchone("SELECT * FROM kg_nodes WHERE id = ?", (nid,))
+            row = self.db.fetchone("SELECT * FROM kg_nodes WHERE id = %s", (nid,))
             if row:
                 nodes.append(dict(row))
 
